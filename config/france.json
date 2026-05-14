@@ -1,0 +1,23 @@
+{
+    "country": "france",
+    "active": 1,
+    "download_path": "./downloads/",
+    "download_quality": "hifi",
+    "album_folder_format": "{artist} - {album}{explicit} ({year})  [{quality}]",
+    "track_filename_format": "{track_number}. {title}",
+    "quality_format": "{bit_depth}B-{sample_rate}kHz",
+    "artist_tag_separator": ", ",
+    "embed_cover": true,
+    "save_cover": true,
+    "save_description": true,
+    "skip_existing": true,
+    "verify_tls": true,
+    "request_timeout": 45,
+    "download_threads": 3,
+    "qobuz": {
+        "app_id": "950096963",
+        "app_secret": "979549437fcc4a3faad4867b5cd25dcb",
+        "user_id": "992824",
+        "auth_token": "u6lHtzb1Vv_TbNYYL_PrIzVZfkMpxUJ4Y4AkpdrfFRaj5o1sbLP7ENCKVD-wQEmkMbQIN-G6vcgzPvwaZdEvPA"
+    }
+}
