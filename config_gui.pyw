@@ -19,7 +19,7 @@ DEFAULT_APP_SECRET = "979549437fcc4a3faad4867b5cd25dcb"
 DEFAULT_CONFIG = {
     "country": "",
     "active": 0,
-    "download_path": "./downloads",
+    "download_path": "./downloads/",
     "download_quality": "hifi",
     "album_folder_format": "{artist} - {album}{explicit} ({year})  [{quality}]",
     "track_filename_format": "{track_number}. {title}",
