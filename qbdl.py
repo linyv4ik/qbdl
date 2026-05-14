@@ -24,13 +24,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-version = "1.001"
+version = "1.000"
 PROGRAM_NAME = "qbdl"
 SCRIPT_PATH = Path(__file__).resolve()
 APP_DIR = SCRIPT_PATH.parent
 WINDOW_TITLE = f"{PROGRAM_NAME} v{version}"
 
-UPDATE_REPOSITORY_URL = "https://github.com/linyv4ik/orpheusdl"
+UPDATE_REPOSITORY_URL = "https://github.com/linyv4ik/qbdl"
 UPDATE_BRANCH = "main"
 UPDATE_SCRIPT_PATH = SCRIPT_PATH.name
 UPDATE_SKIP_PATH_PARTS = {"__pycache__"}
