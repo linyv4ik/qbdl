@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-version = "1.003"
+version = "1.004"
 PROGRAM_NAME = "qbdl"
 SCRIPT_PATH = Path(__file__).resolve()
 APP_DIR = SCRIPT_PATH.parent
