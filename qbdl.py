@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-version = "1.004"
+version = "1.005"
 PROGRAM_NAME = "qbdl"
 SCRIPT_PATH = Path(__file__).resolve()
 APP_DIR = SCRIPT_PATH.parent
@@ -51,7 +51,7 @@ def ensure_dependencies() -> None:
     if not missing:
         return
 
-    print("Installing missing Python packages: " + ", ".join(missing))
+    print("Встановлення відсутніх пакетів Python: " + ", ".join(missing))
     commands = [
         [sys.executable, "-m", "pip", "install", *missing],
         [sys.executable, "-m", "pip", "install", "--user", *missing],
@@ -63,7 +63,7 @@ def ensure_dependencies() -> None:
         try:
             subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
         except subprocess.CalledProcessError as error:
-            raise RuntimeError("pip is not available and ensurepip failed") from error
+            raise RuntimeError("pip недоступний, а встановлення через ensurepip завершилося помилкою") from error
 
     for command in commands:
         try:
@@ -72,7 +72,7 @@ def ensure_dependencies() -> None:
         except subprocess.CalledProcessError:
             if command is commands[-1]:
                 raise
-    print("Dependencies installed. Continuing...")
+    print("Залежності встановлено. Продовжуємо...")
 
 
 ensure_dependencies()
@@ -93,9 +93,9 @@ QUALITY_IDS = {
 }
 
 DEFAULT_SETTINGS = {
-    "download_path": "./downloads",
+    "download_path": "./downloads/",
     "download_quality": "hifi",
-    "album_folder_format": "{artist} - {album}{explicit} ({year})  [{quality}]",
+    "album_folder_format": "{artist} - {album}{explicit} ({year}) [{quality}]",
     "track_filename_format": "{track_number}. {title}",
     "quality_format": "{bit_depth}B-{sample_rate}kHz",
     "artist_tag_separator": ", ",
@@ -109,13 +109,41 @@ DEFAULT_SETTINGS = {
 }
 
 DEFAULT_CONFIG_DIR = APP_DIR / "config"
+DEFAULT_SETTINGS_FILE = APP_DIR / "settings.json"
 DEFAULT_URL_FILE = APP_DIR / "url.txt"
 IGNORED_CONFIG_FILES = {"settings.json"}
 DOWNLOAD_PRINT_LOCK = threading.Lock()
 
 
 class QobuzError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class ReportedQobuzError(QobuzError):
     pass
+
+
+class UkrainianHelpFormatter(argparse.HelpFormatter):
+    def add_usage(self, usage, actions, groups, prefix=None) -> None:
+        super().add_usage(usage, actions, groups, prefix or "Використання: ")
+
+
+class UkrainianArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        translations = {
+            "unrecognized arguments:": "невідомі аргументи:",
+            "expected one argument": "потрібно вказати одне значення",
+            "ignored explicit argument": "зайве значення",
+            "ambiguous option:": "неоднозначний параметр:",
+            "could match": "можливі варіанти:",
+            "argument ": "параметр ",
+        }
+        for original, translated in translations.items():
+            message = message.replace(original, translated)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: помилка: {message}\n")
 
 
 def set_window_title(title: str) -> None:
@@ -141,14 +169,14 @@ def open_config_gui() -> None:
         if path.exists():
             runpy.run_path(str(path), run_name="__main__")
             return
-    raise QobuzError("qbdl config GUI not found")
+    raise QobuzError("Графічний редактор конфігів qbdl не знайдено")
 
 
 def github_repo_parts(repository_url: str) -> tuple[str, str]:
     parsed = urlparse(repository_url.strip())
     parts = parsed.path.strip("/").split("/")
     if len(parts) < 2:
-        raise QobuzError("UPDATE_REPOSITORY_URL must look like https://github.com/user/qbdl")
+        raise QobuzError("UPDATE_REPOSITORY_URL має бути у форматі https://github.com/user/qbdl")
     owner = parts[0]
     repo = parts[1].removesuffix(".git")
     return owner, repo
@@ -217,7 +245,7 @@ def install_update_from_zip(zip_path: Path) -> None:
             target = APP_DIR / relative_path
             resolved_target = target.resolve()
             if app_root != resolved_target and app_root not in resolved_target.parents:
-                raise QobuzError(f"Refusing to write outside app folder: {target}")
+                raise QobuzError(f"Запис за межами папки програми заборонено: {target}")
 
             if source.is_dir():
                 if target.exists() and not target.is_dir():
@@ -231,7 +259,7 @@ def install_update_from_zip(zip_path: Path) -> None:
 
 
 def restart_program() -> None:
-    print(f"Restarting {PROGRAM_NAME}...")
+    print(f"Перезапуск {PROGRAM_NAME}...")
     if os.name == "nt":
         helper_code = (
             "import os, time\n"
@@ -259,36 +287,36 @@ def check_for_updates() -> bool:
     try:
         available_version = remote_version()
     except Exception as error:
-        print(f"Update check failed: {error}")
+        print(f"Не вдалося перевірити оновлення: {error}")
         return False
 
     if not available_version:
-        print(f'Update check failed: version not found in remote {UPDATE_SCRIPT_PATH}')
+        print(f'Не вдалося перевірити оновлення: версію не знайдено у віддаленому файлі {UPDATE_SCRIPT_PATH}')
         return False
 
     available_parts = version_parts(available_version)
     current_parts = version_parts(version)
     if available_parts < current_parts:
-        print(f"GitHub version {available_version} is older than installed {version}. Update skipped.")
+        print(f"Версія на GitHub {available_version} старіша за встановлену {version}. Оновлення пропущено.")
         return False
     if available_parts == current_parts:
         return False
 
-    print(f"Current version: {version}")
-    print(f"New version available: {available_version}")
-    answer = input("Install update now? [y/N]: ").strip().lower()
+    print(f"Поточна версія: {version}")
+    print(f"Доступна нова версія: {available_version}")
+    answer = input("Встановити оновлення зараз? [т/Н]: ").strip().lower()
     if answer not in {"y", "yes", "1", "так", "т"}:
-        print("Update skipped.")
+        print("Оновлення пропущено.")
         return False
 
     with tempfile.TemporaryDirectory(prefix=f"{PROGRAM_NAME}_update_zip_") as temp_dir:
         zip_path = Path(temp_dir) / f"{PROGRAM_NAME}.zip"
-        print("Downloading update...")
+        print("Завантаження оновлення...")
         download_update_zip(zip_path)
-        print("Installing update...")
+        print("Встановлення оновлення...")
         install_update_from_zip(zip_path)
 
-    print("Update installed.")
+    print("Оновлення встановлено.")
     restart_program()
     return True
 
@@ -381,58 +409,35 @@ def active_enabled(value: Any) -> bool:
     return False
 
 
-def normalize_settings(data: dict[str, Any], country_name: str | None = None) -> dict[str, Any]:
-    if is_legacy_config(data):
-        global_settings = data.get("global", {})
-        general = global_settings.get("general", {})
-        formatting = global_settings.get("formatting", {})
-        covers = global_settings.get("covers", {})
-        advanced = global_settings.get("advanced", {})
-        modules = data.get("modules", {})
-        qobuz = modules.get("orpheusdl-qobuz", {})
+def load_shared_settings() -> dict[str, Any]:
+    try:
+        data = load_json(DEFAULT_SETTINGS_FILE)
+    except FileNotFoundError:
+        return DEFAULT_SETTINGS.copy()
+    except (OSError, ValueError) as error:
+        raise QobuzError(f'Не вдалося завантажити налаштування з "{DEFAULT_SETTINGS_FILE}": {error}') from error
 
-        return {
-            **DEFAULT_SETTINGS,
-            "active": active_enabled(data.get("active", 0)),
-            "country": country_name or data.get("country", ""),
-            "download_path": general.get("download_path", DEFAULT_SETTINGS["download_path"]),
-            "download_quality": general.get("download_quality", DEFAULT_SETTINGS["download_quality"]),
-            "album_folder_format": formatting.get(
-                "album_format", DEFAULT_SETTINGS["album_folder_format"]
-            )
-            .replace("{name}", "{album}")
-            .replace("{release_year}", "{year}"),
-            "track_filename_format": formatting.get(
-                "track_filename_format", DEFAULT_SETTINGS["track_filename_format"]
-            ).replace("{name}", "{title}"),
-            "quality_format": qobuz.get("quality_format", DEFAULT_SETTINGS["quality_format"]),
-            "artist_tag_separator": global_settings.get("tags", {}).get(
-                "artist_tag_separator", DEFAULT_SETTINGS["artist_tag_separator"]
-            ),
-            "embed_cover": covers.get("embed_cover", DEFAULT_SETTINGS["embed_cover"]),
-            "save_cover": True,
-            "save_description": True,
-            "skip_existing": not advanced.get("ignore_existing_files", False),
-            "qobuz": {
-                "app_id": qobuz.get("app_id", ""),
-                "app_secret": qobuz.get("app_secret", ""),
-                "user_id": qobuz.get("user_id", ""),
-                "auth_token": qobuz.get("auth_token", ""),
-            },
-        }
+    if not isinstance(data, dict):
+        raise QobuzError(f'Файл налаштувань "{DEFAULT_SETTINGS_FILE}" має містити об’єкт JSON')
+    return {key: data.get(key, value) for key, value in DEFAULT_SETTINGS.items()}
 
-    settings = {**DEFAULT_SETTINGS, **data}
+
+def normalize_settings(
+    data: dict[str, Any],
+    country_name: str | None = None,
+    shared_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    settings = dict(shared_settings if shared_settings is not None else load_shared_settings())
     settings["active"] = active_enabled(data.get("active", 0))
     settings["country"] = data.get("country") or country_name or ""
-    qobuz = settings.get("qobuz", {})
-    if not qobuz:
-        qobuz = {
-            "app_id": settings.get("app_id", ""),
-            "app_secret": settings.get("app_secret", ""),
-            "user_id": settings.get("user_id", ""),
-            "auth_token": settings.get("auth_token", ""),
-        }
-    settings["qobuz"] = qobuz
+    if is_legacy_config(data):
+        qobuz = data.get("modules", {}).get("orpheusdl-qobuz", {})
+    else:
+        qobuz = data.get("qobuz") or data
+    settings["qobuz"] = {
+        field: qobuz.get(field, "")
+        for field in ("app_id", "app_secret", "user_id", "auth_token")
+    }
     return settings
 
 
@@ -448,33 +453,33 @@ def config_paths(config_location: str | None) -> list[Path]:
             for path in location.glob("*.json")
             if path.name.lower() not in IGNORED_CONFIG_FILES
         )
-    raise QobuzError(f'Config location not found: "{location}"')
+    raise QobuzError(f'Файл або папку конфігів не знайдено: "{location}"')
 
 
 def load_active_accounts(config_location: str | None) -> list[AccountConfig]:
     paths = config_paths(config_location)
     if not paths:
         base = Path(config_location) if config_location else DEFAULT_CONFIG_DIR
-        raise QobuzError(f'No country configs found in "{base}"')
+        raise QobuzError(f'У папці "{base}" не знайдено конфігів країн')
 
+    shared_settings = load_shared_settings()
     accounts: list[AccountConfig] = []
     for path in paths:
         try:
             raw = load_json(path)
-            settings = normalize_settings(raw, country_name=path.stem)
+            settings = normalize_settings(raw, country_name=path.stem, shared_settings=shared_settings)
         except Exception as error:
-            print(f'Skipping invalid config "{path}": {error}', file=sys.stderr)
+            print(f'Пропущено некоректний конфіг "{path}": {error}', file=sys.stderr)
             continue
 
         if not settings.get("active"):
-            print(f"Skipping inactive config: {path.name}")
             continue
 
         country = str(settings.get("country") or path.stem)
         accounts.append(AccountConfig(country=country, path=path, settings=settings))
 
     if not accounts:
-        raise QobuzError('No active configs found. Set "active": 1 in at least one config/*.json file.')
+        raise QobuzError('Активних конфігів не знайдено. Встановіть "active": 1 хоча б в одному файлі config/*.json.')
     return accounts
 
 
@@ -530,14 +535,14 @@ def original_cover_url(image_data: dict[str, Any] | None) -> str | None:
 def parse_album_id(value: str) -> str:
     value = value.strip()
     if not value:
-        raise QobuzError("Empty album URL/id")
+        raise QobuzError("Посилання або ідентифікатор альбому порожній")
     if not value.startswith("http"):
         return value
 
     parsed = urlparse(value)
     parts = [part for part in parsed.path.split("/") if part]
     if "album" not in parts or len(parts) < 2:
-        raise QobuzError(f'Not a Qobuz album URL: "{value}"')
+        raise QobuzError(f'Це не посилання на альбом Qobuz: "{value}"')
     return parts[-1]
 
 
@@ -549,7 +554,7 @@ def quality_id(setting: Any) -> int:
         return int(text)
     if text not in QUALITY_IDS:
         raise QobuzError(
-            f'Unknown quality "{setting}". Use one of: {", ".join(sorted(QUALITY_IDS))}'
+            f'Невідома якість "{setting}". Виберіть один із варіантів: {", ".join(sorted(QUALITY_IDS))}'
         )
     return QUALITY_IDS[text]
 
@@ -577,15 +582,15 @@ def tag_value(value: Any) -> list[str] | None:
 
 def file_size_text(size: int | float | None) -> str:
     value = float(size or 0)
-    units = ("B", "KB", "MB", "GB", "TB")
+    units = ("Б", "КБ", "МБ", "ГБ", "ТБ")
     for unit in units:
         if value < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)}B"
+            if unit == "Б":
+                return f"{int(value)}Б"
             text = f"{value:.1f}".rstrip("0").rstrip(".")
             return f"{text}{unit}"
         value /= 1024
-    return "0B"
+    return "0Б"
 
 
 def download_result_line(label: str, size: int | float | None, status: str) -> str:
@@ -602,6 +607,20 @@ def path_size(path: Path) -> int:
 def print_download_result(label: str, size: int | float | None, status: str) -> None:
     with DOWNLOAD_PRINT_LOCK:
         print(download_result_line(label, size, status))
+
+
+def qobuz_api_error_message(status_code: int | None) -> str:
+    messages = {
+        400: "Некоректний запит до Qobuz",
+        401: "Помилка авторизації Qobuz",
+        403: "Доступ до Qobuz заборонено",
+        404: "Не вдалося завантажити",
+        429: "Забагато запитів до Qobuz",
+    }
+    message = messages.get(status_code, "Помилка API Qobuz")
+    if status_code is not None and 500 <= status_code < 600:
+        message = "Помилка сервера Qobuz"
+    return f"{message} ({status_code})" if status_code is not None else message
 
 
 class QobuzClient:
@@ -626,7 +645,7 @@ class QobuzClient:
             if not value
         ]
         if missing:
-            raise QobuzError("Missing Qobuz config values: " + ", ".join(missing))
+            raise QobuzError("У конфігу Qobuz відсутні значення: " + ", ".join(missing))
 
     def headers(self) -> dict[str, str]:
         return {
@@ -662,10 +681,16 @@ class QobuzClient:
                 verify=self.verify_tls,
             )
         if response.status_code not in {200, 201, 202}:
-            raise QobuzError(f"Qobuz API error {response.status_code}: {response.text}")
+            raise QobuzError(
+                qobuz_api_error_message(response.status_code), status_code=response.status_code
+            )
         data = response.json()
         if isinstance(data, dict) and data.get("status") == "error":
-            raise QobuzError(f'Qobuz API error: {data.get("message", data)}')
+            try:
+                status_code = int(data["code"])
+            except (KeyError, TypeError, ValueError):
+                status_code = None
+            raise QobuzError(qobuz_api_error_message(status_code), status_code=status_code)
         return data
 
     def signed_get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -677,8 +702,8 @@ class QobuzClient:
         data = self.signed_get("user/get", {"app_id": self.app_id})
         credential = data.get("credential", {})
         if credential.get("parameters"):
-            return str(data.get("country", "unknown"))
-        raise QobuzError("This Qobuz account is not eligible for downloads")
+            return str(data.get("country", "невідомо"))
+        raise QobuzError("Цей обліковий запис Qobuz не має доступу до завантаження")
 
     def get_album(self, album_id: str) -> dict[str, Any]:
         return self.get(
@@ -730,7 +755,7 @@ class QobuzClient:
                 if target.is_file() and not overwrite and (
                     expected_size == 0 or existing_size >= expected_size
                 ):
-                    print_download_result(label, existing_size, "already downloaded")
+                    print_download_result(label, existing_size, "вже завантажено")
                     return False
 
                 with partial.open("wb") as file:
@@ -741,14 +766,14 @@ class QobuzClient:
 
             if expected_size and bytes_written < expected_size:
                 raise QobuzError(
-                    f"Incomplete download for {label}: "
-                    f"{file_size_text(bytes_written)} of {file_size_text(expected_size)}"
+                    f"Файл {label} завантажено не повністю: "
+                    f"{file_size_text(bytes_written)} із {file_size_text(expected_size)}"
                 )
             os.replace(partial, target)
-            print_download_result(label, expected_size or bytes_written, "done")
+            print_download_result(label, expected_size or bytes_written, "готово")
             return True
         except BaseException:
-            print_download_result(label, bytes_written or expected_size, "fail")
+            print_download_result(label, bytes_written or expected_size, "помилка")
             if partial.exists():
                 partial.unlink()
             raise
@@ -776,7 +801,7 @@ class AlbumDownloader:
         return AlbumMetadata(
             album_id=str(data["id"]),
             title=append_version(data.get("title", ""), data.get("version")),
-            artist=(data.get("artist") or {}).get("name", "Unknown Artist"),
+            artist=(data.get("artist") or {}).get("name", "Невідомий виконавець"),
             artist_id=str((data.get("artist") or {}).get("id") or ""),
             year=year,
             release_date=release_date,
@@ -837,7 +862,7 @@ class AlbumDownloader:
         if stream is not None:
             download_url = stream.get("url") or ""
             if not download_url:
-                raise QobuzError(f'No download URL returned for track "{raw_track.get("title", track_id)}"')
+                raise QobuzError(f'Не отримано посилання для завантаження треку "{raw_track.get("title", track_id)}"')
             format_id = stream.get("format_id")
             format_id = int(format_id) if format_id else None
             bit_depth = stream.get("bit_depth") or bit_depth
@@ -911,7 +936,7 @@ class AlbumDownloader:
     ) -> None:
         track = self.track_metadata(raw_track, album)
         target = self.track_path(album_folder, track)
-        label = f"{index}. Track {index}/{total_tracks}: {track.title}"
+        label = f"{index}. Трек {index}/{total_tracks}: {track.title}"
 
         stream = self.client.get_file_url(track.track_id, self.selected_quality_id)
         track = self.track_metadata(raw_track, album, stream=stream)
@@ -940,16 +965,16 @@ class AlbumDownloader:
         album_folder = self.album_folder(album, output_path)
         album_folder.mkdir(parents=True, exist_ok=True)
 
-        print(f"Album: {album.artist} - {album.title} ({album.year or 'unknown'}) [{album.quality}]")
-        print(f"Tracks: {len(album.tracks)}")
-        print(f"Output: {album_folder}")
+        print(f"Альбом: {album.artist} - {album.title} ({album.year or 'невідомий рік'}) [{album.quality}]")
+        print(f"Треків: {len(album.tracks)}")
+        print(f"Папка збереження: {album_folder}")
 
         cover_path = album_folder / "cover.jpg"
         if album.cover_url and self.settings.get("save_cover", True):
             self.client.download(
                 album.cover_url,
                 cover_path,
-                "cover",
+                "Обкладинка",
                 overwrite=not self.settings.get("skip_existing", True),
             )
 
@@ -1067,17 +1092,15 @@ def download_album_with_accounts(
     output_override: str | None,
     quality_override: str | None,
 ) -> Path:
-    failures: list[str] = []
-
     for index, account in enumerate(accounts, start=1):
         settings = settings_with_overrides(account.settings, output_override, quality_override)
         set_window_title(window_title(account.country or account.path.stem))
-        print(f"\nTrying config {index}/{len(accounts)}: {account.path.name}")
+        print(f"\n{index}/{len(accounts)}: {account.path.name}")
 
         try:
             client = QobuzClient(settings)
             country = client.check_token()
-            print(f"Account region: {country}")
+            print(f"Регіон облікового запису: {country}")
 
             output_path = Path(settings["download_path"])
             if not output_path.is_absolute():
@@ -1087,13 +1110,10 @@ def download_album_with_accounts(
             downloader = AlbumDownloader(settings, client)
             return downloader.download_album(album_id, output_path)
         except Exception as error:
-            message = f"{account.path.name}: {error}"
-            failures.append(message)
-            print(f"Config failed: {message}", file=sys.stderr)
+            prefix = f"{album_id}: " if isinstance(error, QobuzError) and error.status_code == 404 else ""
+            print(f"{prefix}{error}", file=sys.stderr)
 
-    raise QobuzError(
-        f'All active configs failed for album "{album_id}".\n' + "\n".join(failures)
-    )
+    raise ReportedQobuzError(f'Не вдалося завантажити альбом "{album_id}".')
 
 
 def download_values(
@@ -1148,19 +1168,28 @@ def interactive_mode(
 
         try:
             download_values(values, config_location, output_override, quality_override)
+        except ReportedQobuzError:
+            pass
         except Exception as error:
-            print(f"Error: {error}", file=sys.stderr)
+            print(f"Помилка: {error}", file=sys.stderr)
 
 
 def main() -> int:
     set_window_title(window_title())
-    parser = argparse.ArgumentParser(description="qbdl Qobuz album downloader")
-    parser.add_argument("album", nargs="*", help="Qobuz album URL/id, or a text file with album URLs")
-    parser.add_argument("-c", "--config", help="Config folder or file. Defaults to ./config")
-    parser.add_argument("-o", "--output", help="Override download path")
-    parser.add_argument("-q", "--quality", help="Override quality: hifi, lossless, mp3, or numeric Qobuz id")
-    parser.add_argument("--config-gui", action="store_true", help="Open the config generator GUI")
-    parser.add_argument("--no-update", action="store_true", help="Skip GitHub self-update check")
+    parser = UkrainianArgumentParser(
+        description="qbdl — завантаження альбомів Qobuz",
+        formatter_class=UkrainianHelpFormatter,
+        add_help=False,
+    )
+    parser._positionals.title = "Позиційні аргументи"
+    parser._optionals.title = "Параметри"
+    parser.add_argument("-h", "--help", action="help", help="Показати цю довідку та вийти")
+    parser.add_argument("album", nargs="*", metavar="АЛЬБОМ", help="Посилання або ідентифікатор альбому Qobuz чи текстовий файл із посиланнями на альбоми")
+    parser.add_argument("-c", "--config", metavar="КОНФІГ", help="Файл або папка конфігів. За замовчуванням: ./config")
+    parser.add_argument("-o", "--output", metavar="ПАПКА", help="Змінити папку завантаження")
+    parser.add_argument("-q", "--quality", metavar="ЯКІСТЬ", help="Змінити якість: hifi, lossless, mp3 або числовий ідентифікатор Qobuz")
+    parser.add_argument("--config-gui", action="store_true", help="Відкрити графічний редактор конфігів")
+    parser.add_argument("--no-update", action="store_true", help="Пропустити перевірку оновлень на GitHub")
     args = parser.parse_args()
     set_window_title(window_title())
 
@@ -1183,9 +1212,11 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("\nAborted")
+        print("\nРоботу перервано")
         raise SystemExit(130)
+    except ReportedQobuzError:
+        raise SystemExit(1)
     except QobuzError as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Помилка: {error}", file=sys.stderr)
         raise SystemExit(1)
 
