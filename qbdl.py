@@ -15,16 +15,17 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TextIO
 from urllib.parse import urlparse
 
 
-version = "1.005"
+version = "1.006"
 PROGRAM_NAME = "qbdl"
 SCRIPT_PATH = Path(__file__).resolve()
 APP_DIR = SCRIPT_PATH.parent
@@ -78,7 +79,9 @@ def ensure_dependencies() -> None:
 ensure_dependencies()
 
 import requests
+from mutagen import MutagenError
 from mutagen.flac import FLAC, Picture
+from mutagen.mp3 import MP3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -122,6 +125,10 @@ class QobuzError(RuntimeError):
 
 
 class ReportedQobuzError(QobuzError):
+    pass
+
+
+class QobuzPurchaseRequiredError(QobuzError):
     pass
 
 
@@ -370,6 +377,7 @@ class TrackMetadata:
     sample_rate: float | int | None
     format_id: int | None
     download_url: str
+    mime_type: str | None = None
 
 
 def make_session() -> requests.Session:
@@ -609,6 +617,133 @@ def print_download_result(label: str, size: int | float | None, status: str) -> 
         print(download_result_line(label, size, status))
 
 
+def enable_console_updates(stream: TextIO) -> bool:
+    if not stream.isatty():
+        return False
+    if os.name != "nt":
+        return os.environ.get("TERM") != "dumb"
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetConsoleMode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.SetConsoleMode.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        mode = wintypes.DWORD()
+        return bool(
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            and kernel32.SetConsoleMode(handle, mode.value | 0x0001 | 0x0004)
+        )
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def fit_console_line(line: str, width: int) -> str:
+    clean = "".join(character if character.isprintable() else " " for character in line)
+
+    def character_width(character: str) -> int:
+        if unicodedata.combining(character):
+            return 0
+        return 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+
+    def clip(text: str, available: int) -> str:
+        characters: list[str] = []
+        remaining = available
+        for character in text:
+            cells = character_width(character)
+            if cells > remaining:
+                while characters and remaining < 1:
+                    remaining += character_width(characters.pop())
+                return "".join(characters) + ("…" if available else "")
+            characters.append(character)
+            remaining -= cells
+        return "".join(characters)
+
+    prefix, separator, status = clean.rpartition(": ")
+    status_width = sum(character_width(character) for character in status)
+    if separator and status_width + 2 < width:
+        return clip(prefix, width - status_width - 2) + separator + status
+    return clip(clean, max(0, width))
+
+
+class OrderedTrackDisplay:
+    def __init__(self, labels: list[str], stream: TextIO | None = None):
+        self.labels = labels
+        self.stream = stream if stream is not None else sys.stdout
+        self.terminal_size = shutil.get_terminal_size()
+        self.live = (
+            bool(labels)
+            and len(labels) < self.terminal_size.lines
+            and self.terminal_size.columns >= 20
+            and enable_console_updates(self.stream)
+        )
+        self.completed: dict[int, str] = {}
+        self.next_line = 0
+
+    def __enter__(self):
+        if self.live:
+            rows = [
+                fit_console_line(f"{label}: завантаження", self.terminal_size.columns - 1)
+                for label in self.labels
+            ]
+            self.stream.write("\x1b[?25l" + "\n".join(rows) + "\n")
+            self.stream.flush()
+        return self
+
+    def update(self, index: int, line: str) -> None:
+        self.completed[index] = line
+        if self.live and shutil.get_terminal_size() != self.terminal_size:
+            # Resizing can reflow old rows, so stop moving the cursor through them.
+            self.stream.write("\x1b[?25h\r")
+            self.live = False
+        if self.live:
+            distance = len(self.labels) - index
+            row = fit_console_line(line, self.terminal_size.columns - 1)
+            self.stream.write(f"\x1b[{distance}A\r{row}\x1b[K\r\x1b[{distance}B")
+        else:
+            while self.next_line in self.completed:
+                self.stream.write(str(self.completed[self.next_line]) + "\n")
+                self.next_line += 1
+        self.stream.flush()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.live:
+            self.stream.write("\x1b[?25h")
+            self.stream.flush()
+
+
+def audio_extension(format_id: int | str | None, mime_type: str | None = None) -> str:
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    mime_extensions = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/flac": "flac",
+        "audio/x-flac": "flac",
+    }
+    if mime in mime_extensions:
+        return mime_extensions[mime]
+    if mime and mime not in {"application/octet-stream", "binary/octet-stream"}:
+        raise QobuzError(f"Непідтримуваний аудіоформат Qobuz: {mime}")
+    format_extensions = {5: "mp3", 6: "flac", 7: "flac", 27: "flac"}
+    try:
+        return format_extensions[int(format_id)]
+    except (KeyError, TypeError, ValueError) as error:
+        raise QobuzError(f"Невідомий аудіоформат Qobuz: {format_id}") from error
+
+
+def detect_audio_extension(path: Path) -> str:
+    # Parse the contents explicitly: automatic detection can trust a wrong suffix.
+    for audio_type, extension in ((FLAC, "flac"), (MP3, "mp3")):
+        try:
+            audio_type(path)
+        except MutagenError:
+            continue
+        return extension
+    raise QobuzError("Завантажений файл не є підтримуваним аудіо MP3 або FLAC.")
+
+
 def qobuz_api_error_message(status_code: int | None) -> str:
     messages = {
         400: "Некоректний запит до Qobuz",
@@ -724,7 +859,19 @@ class QobuzClient:
             "app_id": self.app_id,
             "user_auth_token": self.auth_token,
         }
-        return self.signed_get("track/getFileUrl", params)
+        stream = self.signed_get("track/getFileUrl", params)
+        if active_enabled(stream.get("sample")):
+            restrictions = {
+                restriction.get("code")
+                for restriction in stream.get("restrictions") or []
+                if isinstance(restriction, dict)
+            }
+            if "TrackRestrictedByPurchaseCredentials" in restrictions:
+                raise QobuzPurchaseRequiredError(
+                    "Цей трек доступний для цього облікового запису лише після покупки."
+                )
+            raise QobuzError("Qobuz повернув лише уривок для прослуховування замість повного треку.")
+        return stream
 
     def download(
         self,
@@ -732,7 +879,11 @@ class QobuzClient:
         target: Path,
         label: str,
         overwrite: bool = False,
-    ) -> bool:
+        *,
+        validate_audio: bool = False,
+        report: Callable[[str, int | float | None, str], None] | None = None,
+    ) -> Path | None:
+        report = report if report is not None else print_download_result
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".part")
         if partial.exists():
@@ -755,8 +906,15 @@ class QobuzClient:
                 if target.is_file() and not overwrite and (
                     expected_size == 0 or existing_size >= expected_size
                 ):
-                    print_download_result(label, existing_size, "вже завантажено")
-                    return False
+                    valid_existing = True
+                    if validate_audio:
+                        try:
+                            valid_existing = detect_audio_extension(target) == target.suffix[1:].lower()
+                        except QobuzError:
+                            valid_existing = False
+                    if valid_existing:
+                        report(label, existing_size, "вже завантажено")
+                        return None
 
                 with partial.open("wb") as file:
                     for chunk in response.iter_content(chunk_size=1024 * 256):
@@ -769,11 +927,24 @@ class QobuzClient:
                     f"Файл {label} завантажено не повністю: "
                     f"{file_size_text(bytes_written)} із {file_size_text(expected_size)}"
                 )
+            if validate_audio:
+                extension = detect_audio_extension(partial)
+                target = target.with_suffix(f".{extension}")
+                label = f"{label} [{extension.upper()}]"
+                if target.is_file() and not overwrite and path_size(target) >= bytes_written:
+                    try:
+                        valid_existing = detect_audio_extension(target) == extension
+                    except QobuzError:
+                        valid_existing = False
+                    if valid_existing:
+                        partial.unlink()
+                        report(label, path_size(target), "вже завантажено")
+                        return None
             os.replace(partial, target)
-            print_download_result(label, expected_size or bytes_written, "готово")
-            return True
+            report(label, expected_size or bytes_written, "готово")
+            return target
         except BaseException:
-            print_download_result(label, bytes_written or expected_size, "помилка")
+            report(label, bytes_written or expected_size, "помилка")
             if partial.exists():
                 partial.unlink()
             raise
@@ -856,7 +1027,8 @@ class AlbumDownloader:
             composer = raw_track["composer"].get("name")
 
         download_url = ""
-        format_id = 5 if self.selected_quality_id == 5 else self.selected_quality_id
+        format_id = self.selected_quality_id
+        mime_type = None
         bit_depth = album.bit_depth
         sample_rate = album.sample_rate
         if stream is not None:
@@ -865,6 +1037,7 @@ class AlbumDownloader:
                 raise QobuzError(f'Не отримано посилання для завантаження треку "{raw_track.get("title", track_id)}"')
             format_id = stream.get("format_id")
             format_id = int(format_id) if format_id else None
+            mime_type = stream.get("mime_type")
             bit_depth = stream.get("bit_depth") or bit_depth
             sample_rate = stream.get("sampling_rate") or sample_rate
 
@@ -885,6 +1058,7 @@ class AlbumDownloader:
             sample_rate=sample_rate,
             format_id=format_id,
             download_url=download_url,
+            mime_type=mime_type,
         )
 
     def album_folder(self, album: AlbumMetadata, output_path: Path) -> Path:
@@ -918,7 +1092,7 @@ class AlbumDownloader:
         }
         filename = self.settings["track_filename_format"].format(**tags)
         filename = truncate_component(sanitize_name(filename))
-        extension = "mp3" if track.format_id == 5 else "flac"
+        extension = audio_extension(track.format_id, track.mime_type)
 
         folder = album_folder
         if track.total_discs and track.total_discs > 1:
@@ -933,24 +1107,32 @@ class AlbumDownloader:
         cover_path: Path,
         index: int,
         total_tracks: int,
-    ) -> None:
+    ) -> str:
         track = self.track_metadata(raw_track, album)
-        target = self.track_path(album_folder, track)
         label = f"{index}. Трек {index}/{total_tracks}: {track.title}"
+        result_line = download_result_line(label, 0, "готово")
+
+        def capture_result(result_label: str, size: int | float | None, status: str) -> None:
+            nonlocal result_line
+            result_line = download_result_line(result_label, size, status)
 
         stream = self.client.get_file_url(track.track_id, self.selected_quality_id)
         track = self.track_metadata(raw_track, album, stream=stream)
-        downloaded = self.client.download(
+        target = self.track_path(album_folder, track)
+        downloaded_path = self.client.download(
             track.download_url,
             target,
             label,
             overwrite=not self.settings.get("skip_existing", True),
+            validate_audio=True,
+            report=capture_result,
         )
-        if not downloaded:
-            return
+        if downloaded_path is None:
+            return result_line
 
-        if target.suffix.lower() == ".flac":
-            self.tag_flac(target, track, cover_path if cover_path.exists() else None)
+        if downloaded_path.suffix.lower() == ".flac":
+            self.tag_flac(downloaded_path, track, cover_path if cover_path.exists() else None)
+        return result_line
 
     def download_thread_count(self, total_tracks: int) -> int:
         try:
@@ -962,6 +1144,13 @@ class AlbumDownloader:
 
     def download_album(self, album_id: str, output_path: Path) -> Path:
         album = self.album_metadata(album_id)
+        if album.tracks and all(track.get("streamable") is False for track in album.tracks):
+            try:
+                self.client.get_file_url(str(album.tracks[0]["id"]), self.selected_quality_id)
+            except QobuzPurchaseRequiredError as error:
+                raise QobuzPurchaseRequiredError(
+                    "Цей альбом доступний лише після покупки"
+                ) from error
         album_folder = self.album_folder(album, output_path)
         album_folder.mkdir(parents=True, exist_ok=True)
 
@@ -985,21 +1174,35 @@ class AlbumDownloader:
 
         total_tracks = len(album.tracks)
         download_threads = self.download_thread_count(total_tracks)
-        with ThreadPoolExecutor(max_workers=download_threads) as executor:
-            futures = [
-                executor.submit(
-                    self.download_track_task,
-                    raw_track,
-                    album,
-                    album_folder,
-                    cover_path,
-                    index,
-                    total_tracks,
-                )
-                for index, raw_track in enumerate(album.tracks, start=1)
-            ]
-            for future in as_completed(futures):
-                future.result()
+        labels = [
+            f"{index}. Трек {index}/{total_tracks}: {self.track_metadata(raw_track, album).title}"
+            for index, raw_track in enumerate(album.tracks, start=1)
+        ]
+        errors: dict[int, Exception] = {}
+        with OrderedTrackDisplay(labels) as display:
+            with ThreadPoolExecutor(max_workers=download_threads) as executor:
+                futures = {
+                    executor.submit(
+                        self.download_track_task,
+                        raw_track,
+                        album,
+                        album_folder,
+                        cover_path,
+                        index,
+                        total_tracks,
+                    ): index - 1
+                    for index, raw_track in enumerate(album.tracks, start=1)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        result_line = future.result()
+                    except Exception as error:
+                        errors[index] = error
+                        result_line = f"{labels[index]}: помилка"
+                    display.update(index, result_line)
+        if errors:
+            raise errors[min(errors)]
 
         return album_folder
 
